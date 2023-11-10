@@ -1,5 +1,5 @@
 # chimera
-Perl scripts for analysis of unmapped RNA-seq reads from Hi-GRIL sequencing with the aim to find chimeras, consisting of part sRNA part mRNA.
+Perl scripts for analysis of unmapped short reads from Hi-GRIL sequencing with the aim to find chimeras, consisting of part sRNA part mRNA.
 
 ## part 1:
 generate_start_and_end_from_shortreads.pl
