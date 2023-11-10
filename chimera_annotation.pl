@@ -2,7 +2,7 @@ use warnings;
 use strict;
 use Getopt::Long;
 
-# Karsten Hokamp, Trinity College Dublin, Dec 2019
+# Karsten Hokamp, Trinity College Dublin, Apr 2021
 #
 # part 3 of a multi-part analysis that tries to detect chimeric RNA sequences
 # here we focus on a subset of annotated features (sRNAs) and create output files for each of them
@@ -10,16 +10,24 @@ use Getopt::Long;
 # and the feature that is either overlapped by the other start/end or lies nearby its mapping position
 
 my $annotation_file = '';
+my $full_id = '';
+my $short_gene = '';
+my $brief = '';
+my $add_srna = '';
 
 &GetOptions(
     'annotations=s' => \$annotation_file,
+    'full_id' => \$full_id,
+    'add_srna' => \$add_srna,
+    'brief' => \$brief,
+    'short_gene' => \$short_gene,
     );
 
 my %loc = ();
 my %sRNA = ();
 
 open (IN, $annotation_file)
-    or die;
+    or die "Can't read from $annotation_file: $!";
 
 #NZ_CP008706.1   RefSeq  gene    92960   93224   .       +       .       ID=sRNA1
 #NZ_CP008706.1   RefSeq  gene    3810843 3810999 .       +       .       ID=sRNA2
@@ -29,21 +37,33 @@ while (<IN>) {
     chomp;
     s/\cM//;
     my @h = split /\t/, $_;
+    next if ($h[1] eq 'Protein');
+    my $type = $h[2];
+    next if ($type eq 'region');
     my $start = $h[3];
     my $end = $h[4];
     my $strand = $h[6];
+    my $len = $end - $start;
+    if ($len > 50000) {
+        die "Skipping feature of length $len ($h[-1])\n";
+        next;
+    }
     my $id = $h[-1];
     $id =~ s/ID=//;
 #    next unless ($id =~ /ABUW_RS11280/);
-    if ($id =~ /^sRNA.+/) {
-	$id =~ s/\;.+//;
-	foreach ($start..$end) {
-	    $sRNA{$strand}{$_} = $id;
-	}
+    if ($id =~ /^gene-sRNA.+/) {        
+        $id =~ s/\;.+//;
+        $id =~ s/gene-//;
+        foreach ($start..$end) {
+            $sRNA{$h[0]}{$strand}{$_} = $id;
+            if ($add_srna) {
+                $loc{$h[0]}{$strand}{$_} = $id;
+            }
+        }
     } else {
-	foreach ($start..$end) {
-	    $loc{$strand}{$_} = $id;
-	}	
+        foreach ($start..$end) {
+            $loc{$h[0]}{$strand}{$_} = $id;
+        }       
     }
 }
 close IN;
@@ -54,99 +74,127 @@ close IN;
 my $header = <>;
 chomp $header;
 $header =~ s/\cM//;
-$header .= "\tparent\tproduct";
-
+$header .= "\tparent\tproduct" unless ($brief);
+$header =~ s/distance/Feature2\tdistance/ unless ($brief);
 my %done = ();
 
+my $printed = 0;
 while (<>) {
     chomp;
     s/\cM//;
-    my ($id, $sample, $start, $start_strand, $feature1, $end, $end_strand, $feature2, $distance, $start_seq, $end_seq) = split /\t/, $_;
+    my ($id, $sample, $chr, $start, $start_strand, $chr2, $end, $end_strand, $distance, $start_mapq, $end_mapq, $start_seq, $end_seq) = split /\t/, $_;
+    $id =~ s/.+\:// unless ($full_id);
+    my $feature1 = '';
+    my $feature2 = '';
     my $sRNA = '';
     my $parent = '';
     my $product = '';
-    if (defined $sRNA{$start_strand}{$start}) {
-	$sRNA = $sRNA{$start_strand}{$start};
-	$feature1 = $sRNA{$start_strand}{$start};
-	if (defined $loc{$end_strand}{$end}) {
-	    $feature2 = $loc{$end_strand}{$end};
-	} else {
-	    $feature2 = &find_closest($end_strand, $end);
-	}
-	($parent, $product) = &parse($feature2);
-    } elsif (defined $sRNA{$end_strand}{$end}) {
-	$sRNA = $sRNA{$end_strand}{$end};
-        $feature2 = $sRNA{$end_strand}{$end};
-        if (defined $loc{$start_strand}{$start}) {
-            $feature1 = $loc{$start_strand}{$start};
-	} else {
-	    $feature1 = &find_closest($start_strand, $start);
-	}
-	($parent, $product) = &parse($feature1);
+    if (defined $sRNA{$chr}{$start_strand}{$start}) {
+        $sRNA = $sRNA{$chr}{$start_strand}{$start};
+        $feature1 = $sRNA{$chr}{$start_strand}{$start};
+        if (defined $loc{$chr2}{$end_strand}{$end}) {
+            $feature2 = $loc{$chr2}{$end_strand}{$end};
+        } else {
+            $feature2 = &find_closest($chr2, $end_strand, $end);
+        }
+        ($parent, $product) = &parse($feature2);
+    } elsif (defined $sRNA{$chr2}{$end_strand}{$end}) {
+        $sRNA = $sRNA{$chr2}{$end_strand}{$end};
+        $feature2 = $sRNA{$chr2}{$end_strand}{$end};
+        if (defined $loc{$chr}{$start_strand}{$start}) {
+            $feature1 = $loc{$chr}{$start_strand}{$start};
+        } else {
+            $feature1 = &find_closest($chr, $start_strand, $start);
+        }
+        ($parent, $product) = &parse($feature1);
     }
+
+    if ($feature1 eq $feature2) {
+        warn "Skipping chimera between $feature1 + $feature2\n";
+        next;
+    }
+    
     if ($sRNA ne '') {
-#	and $sRNA eq 'sRNA21') {
-	my $file = "sRNA_detection_$sRNA.xls";
-	unless (-s $file) {
-	    open (OUT, ">$file")
-		or die;
-	    print OUT "$header\n";
-	    close OUT;
-	} 
-	my $out = "".(join "\t", ($id, $sample, $start, $start_strand, $feature1, $end, $end_strand, $feature2, $distance, $start_seq, $end_seq, $parent, $product))."\n";
-	next if (defined $done{$out});
-	$done{$out}++;
-	open (OUT, ">>$file")
-	    or die;	
-	print OUT $out;
-	close OUT;
+#       and $sRNA eq 'sRNA21') {
+        my $file = "sRNA_detection_$sRNA.xls";
+
+        unless (-s $file) {
+            open (OUT, ">$file")
+                or die;
+            print OUT "$header\n";
+            close OUT;
+        } 
+
+        # if file is more than a day old, then it might have been left after a previous run and should not be added to
+        my $mtime = (stat($file))[9];
+        my $diff = time - $mtime;
+        if ($diff > 24 * 3600) {
+            die "$file is more than a day old - should I really add to it?";
+        }
+
+        if ($short_gene) {
+            $feature1 =~ s/;.+//;
+            $feature2 =~ s/;.+//;
+        }
+        my $out = "".(join "\t", ($id, $sample, $chr, $start, $start_strand, $feature1, $end, $chr2, $end_strand, $feature2, $distance, $start_mapq, $end_mapq, $start_seq, $end_seq, $parent, $product))."\n";
+        if ($brief) {
+            $out = "".(join "\t", ($id, $sample, $chr, $start, $start_strand, $feature1, $end, $chr2, $end_strand, $feature2, $distance, $start_mapq, $end_mapq))."\n";
+        }
+        next if (defined $done{$out});
+        $done{$out}++;
+        open (OUT, ">>$file")
+            or die;
+        $printed++;
+#       print OUT "$printed $out";
+        print OUT $out;
+        close OUT;
     }
 }
-
 
 sub find_closest {
 
     # a read has been mapped to a position which does not overlap with an annotated feature
     # find the closest annotated feature by moving in both directions until an overlap is found
     # choose the one with the smallest difference (or the one upstream in case of a tie):
-    
+
+    my $chr = shift;
     my $strand = shift;
     my $pos = shift;
     my $up = '';
     my $down = '';
     my $add = 0;
     until ($up) {
-	$add++;
-	if ($add > 1000000) {
-	    warn "More than a million bp from $pos away!\n";
-	    last;
-	}
-	if (defined $loc{$strand}{$pos+$add}) {
-	    $up = $add;
-	}
+        $add++;
+        if ($add > 1000000) {
+            warn "More than a million bp from $pos away!\n";
+            last;
+        }
+        if (defined $loc{$chr}{$strand}{$pos+$add}) {
+            $up = $add;
+        }
     }
     $add = 0;
     until ($down) {
         $add++;
-	if ($pos-$add < 0) {
-	    warn "Reached below 0 from $pos!\n";
-	    last;
-	}
-        if (defined $loc{$strand}{$pos-$add}) { 
+        if ($pos-$add < 0) {
+            warn "Reached below 0 from $pos!\n";
+            last;
+        }
+        if (defined $loc{$chr}{$strand}{$pos-$add}) { 
             $down = $add;
         }
     }
     
     if ($down eq '') {
-	return ($loc{$strand}{$pos+$up});
+        return ($loc{$chr}{$strand}{$pos+$up});
     } elsif ($up eq '') {
-	return ($loc{$strand}{$pos-$down});
+        return ($loc{$chr}{$strand}{$pos-$down});
     }
 
     if ($down < $up) {
-	return ($loc{$strand}{$pos-$down});
+        return ($loc{$chr}{$strand}{$pos-$down});
     } else {
-	return ($loc{$strand}{$pos+$up});
+        return ($loc{$chr}{$strand}{$pos+$up});
     }
 }
 
@@ -158,10 +206,11 @@ sub parse {
     my $pa = '';
     my $pr = '';
     if ($string =~ /Parent=(.+?);/) {
-	$pa = $1;
+        $pa = $1;
     }
-    if ($string =~ /product=(.+?);/) {
-	$pr = $1;
+    if ($string =~ /product=(.+)/) {
+        $pr = $1;
+        $pr =~ s/;.+//;
     }
     return ($pa, $pr);
 }
